@@ -1,0 +1,169 @@
+#!/usr/bin/env ruby
+
+require "optparse"
+require "net/http"
+require "uri"
+require "json"
+require "yaml"
+require "base64"
+
+class JwConfig
+  def initialize(config)
+    @config = config
+  end
+
+  def [](key)
+    @config[key.to_sym] || @config[key.to_s]
+  end
+
+  def config_scope
+    self[:config_scope] ||= "local"
+  end
+
+  def method_missing(key, *args)
+    self[key]
+  end
+
+  def self.load(config_file)
+    config = YAML.load_file(File.expand_path(config_file))
+    new(config)
+  rescue Errno::ENOENT
+    new({})
+  end
+end
+
+class JwConfig
+  def initialize(config)
+    @config = config
+  end
+
+  def get(key)
+    `git config --get --#{@config.config_scope} jw.#{key}`.strip
+  end
+
+  def set(key, value)
+    system("git config set --#{@config.config_scope} jw.#{key} '#{value}'")
+  end
+end
+
+class JiraHelper
+  def self.get_summary(jira_key)
+    uri = URI.parse("https://aurorasolar.atlassian.net/rest/api/3/issue/#{jira_key}")
+    request = Net::HTTP::Get.new(uri)
+    request["Accept"] = "application/json"
+    request["Authorization"] = "Basic #{Base64.strict_encode64(ENV["JIRA_WORKFLOW_API_KEY"])}"
+    request["Content-Type"] = "application/json"
+    
+    response = Net::HTTP.start(uri.hostname, uri.port, use_ssl: true) do |http|
+      http.request(request)
+    end
+
+    unless response.is_a?(Net::HTTPSuccess)
+      puts "Error fetching Jira issue: #{response.code} #{response.message}"
+      exit(1)
+    end
+
+    JSON.parse(response.body)["fields"]["summary"]
+  rescue JSON::ParserError => e
+    puts "Error parsing Jira response: #{e.message}"
+    exit(1)
+  rescue StandardError => e
+    puts "Error accessing Jira: #{e.message}"
+    exit(1)
+  end
+end
+
+
+class JiraWorkflow
+  def initialize(argv = [])
+    @config = JwConfig.load("~/.jw.yml")
+    @jw_config = JwConfig.new(@config)
+
+    @options = {}
+    opt_parser = OptionParser.new do |opts|
+      opts.banner = "Usage: jw [options]"
+      opts.on("-h", "--help", "Show this help message") do
+        puts opts
+        exit
+      end
+      opts.on("--commit-msg-hook", "Set commit-msg git hook mode") do
+        @options[:commit_msg] = true
+      end
+    end
+
+    begin
+      opt_parser.parse!(argv)
+    rescue OptionParser::InvalidOption => e
+      puts e.message
+      puts opt_parser.help
+      exit(1)
+    end
+  end
+
+  def set_jira_workflow_configs(jira_str)
+    unless m = jira_str.match(/\/?([A-Za-z]+-\d+)$/)
+      puts "Invalid Jira key"
+      exit(1)
+    end
+    jira_key = m[1].upcase
+
+    jira_summary = JiraHelper.get_summary(jira_key)
+    @jw_config.set("key", jira_key)
+    @jw_config.set("summary", jira_summary)
+    display_jira_workflow_configs
+  end
+
+  def display_jira_workflow_configs
+    key = @jw_config.get("key")
+    summary = @jw_config.get("summary")
+    if key.empty? || summary.empty?
+      puts "No Jira Workflow configs found"
+    else
+      puts "Jira key:     #{key}"
+      puts "Jira summary: #{summary}"
+    end
+  end
+
+  def set_commit_msg(argv)
+    commit_msg_file = argv.first
+    if commit_msg_file.nil?
+      puts "No commit message file provided"
+      exit(1)
+    end
+
+    if !File.exist?(commit_msg_file)
+      puts "Commit message file does not exist"
+      exit(1)
+    end
+
+    commit_msg = File.read(commit_msg_file)
+    if commit_msg.empty?
+      puts "Commit message file is empty"
+      exit(1)
+    end
+
+    if m = commit_msg.match(/\A\[[A-Za-z]+-\d+\]/)
+      puts "Jira key already exists: #{m[0]}"
+      exit(0)
+    end
+
+    File.write(commit_msg_file, "[#{@jw_config.get("key")}] #{commit_msg}")
+    puts "Commit message updated"
+  end
+
+  def run
+    if @options[:commit_msg]
+      set_commit_msg(ARGV)
+    elsif ARGV.empty?
+      display_jira_workflow_configs
+    else
+      set_jira_workflow_configs(ARGV[0])
+    end
+    0
+  end
+end
+
+if __FILE__ == $0
+  jw = JiraWorkflow.new(ARGV)
+  exit(jw.run)
+end
