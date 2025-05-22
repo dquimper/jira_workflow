@@ -7,7 +7,7 @@ require "json"
 require "yaml"
 require "base64"
 
-class JwConfig
+class JwRcConfig
   def initialize(config)
     @config = config
   end
@@ -18,6 +18,14 @@ class JwConfig
 
   def config_scope
     self[:config_scope] ||= "local"
+  end
+
+  def git_branch_prefix
+    self[:git_branch_prefix] ||= "feature"
+  end
+
+  def default_branch
+    self[:default_branch] ||= "main"
   end
 
   def method_missing(key, *args)
@@ -33,27 +41,27 @@ class JwConfig
 end
 
 class JwConfig
-  def initialize(config)
-    @config = config
+  def initialize(rc)
+    @rc = rc
   end
 
   def get(key)
-    `git config --get --#{@config.config_scope} jw.#{key}`.strip
+    `git config --get --#{@rc.config_scope} jw.#{key}`.strip
   end
 
   def set(key, value)
-    system("git config set --#{@config.config_scope} jw.#{key} '#{value}'")
+    system("git config set --#{@rc.config_scope} jw.#{key} \"#{value}\"")
   end
 end
 
 class JiraHelper
-  def self.get_summary(jira_key)
+  def self.get_issue(jira_key)
     uri = URI.parse("https://aurorasolar.atlassian.net/rest/api/3/issue/#{jira_key}")
     request = Net::HTTP::Get.new(uri)
     request["Accept"] = "application/json"
     request["Authorization"] = "Basic #{Base64.strict_encode64(ENV["JIRA_WORKFLOW_API_KEY"])}"
     request["Content-Type"] = "application/json"
-    
+
     response = Net::HTTP.start(uri.hostname, uri.port, use_ssl: true) do |http|
       http.request(request)
     end
@@ -63,7 +71,7 @@ class JiraHelper
       exit(1)
     end
 
-    JSON.parse(response.body)["fields"]["summary"]
+    JSON.parse(response.body)
   rescue JSON::ParserError => e
     puts "Error parsing Jira response: #{e.message}"
     exit(1)
@@ -71,13 +79,93 @@ class JiraHelper
     puts "Error accessing Jira: #{e.message}"
     exit(1)
   end
+
+  def self.transition_map(jira_key)
+    uri = URI.parse("https://aurorasolar.atlassian.net/rest/api/3/issue/#{jira_key}/transitions")
+    request = Net::HTTP::Get.new(uri)
+    request["Accept"] = "application/json"
+    request["Authorization"] = "Basic #{Base64.strict_encode64(ENV["JIRA_WORKFLOW_API_KEY"])}"
+    request["Content-Type"] = "application/json"
+
+    response = Net::HTTP.start(uri.hostname, uri.port, use_ssl: true) do |http|
+      http.request(request)
+    end
+
+    unless response.is_a?(Net::HTTPSuccess)
+      puts "Error fetching Jira issue transitions: #{response.code} #{response.message}"
+      exit(1)
+    end
+
+    JSON.parse(response.body)["transitions"].to_h { |t| [t["name"], t["id"]] }
+  rescue JSON::ParserError => e
+    puts "Error parsing Jira response: #{e.message}"
+    exit(1)
+  rescue StandardError => e
+    puts "Error accessing Jira: #{e.message}"
+    puts e.backtrace_locations.first
+    exit(1)
+  end
+
+  def self.set_status(jira_key, status)
+    uri = URI.parse("https://aurorasolar.atlassian.net/rest/api/3/issue/#{jira_key}/transitions")
+    request = Net::HTTP::Post.new(uri)
+    request["Accept"] = "application/json"
+    request["Authorization"] = "Basic #{Base64.strict_encode64(ENV["JIRA_WORKFLOW_API_KEY"])}"
+    request["Content-Type"] = "application/json"
+
+    request.body = {
+      transition: {
+        id: transition_map(jira_key)[status],
+      }
+    }.to_json
+
+    response = Net::HTTP.start(uri.hostname, uri.port, use_ssl: true) do |http|
+      http.request(request)
+    end
+
+    unless response.is_a?(Net::HTTPSuccess)
+      puts "Error updating Jira issue status: #{response.code} #{response.message}"
+      exit(1)
+    end
+  rescue JSON::ParserError => e
+    puts "Error parsing Jira response: #{e.message}"
+    exit(1)
+  rescue StandardError => e
+    puts "Error accessing Jira: #{e.message}"
+    puts e.backtrace_locations.first
+    exit(1)
+  end
+
+  def self.get_summary(issue)
+    return issue["fields"]["summary"]
+  end
+
+  def self.get_status(issue)
+    return issue["fields"]["status"]["name"]
+  end
 end
 
+class GitHelper
+  def initialize(rc)
+    @rc = rc
+  end
+
+  def create_branch(jira_key)
+    new_branch = "#{@rc.git_branch_prefix}/#{jira_key}"
+    # Check if the branch already exists
+    if `git branch --list #{new_branch}`.strip.empty?
+      system("git stash && git checkout #{@rc.default_branch} && git pull && git checkout -b #{new_branch} && git stash pop")
+    else
+      system("git stash && git checkout #{@rc.default_branch} && git pull && git checkout #{new_branch} && git rebase #{@rc.default_branch} && git stash pop")
+    end
+  end
+end
 
 class JiraWorkflow
   def initialize(argv = [])
-    @config = JwConfig.load("~/.jw.yml")
-    @jw_config = JwConfig.new(@config)
+    @rc = JwRcConfig.load("~/.jwrc.yml")
+    @jw_config = JwConfig.new(@rc)
+    @git_helper = GitHelper.new(@rc)
 
     @options = {}
     opt_parser = OptionParser.new do |opts|
@@ -86,8 +174,17 @@ class JiraWorkflow
         puts opts
         exit
       end
+
+      opts.on("-i", "--init BRANCH", "Initialize jw with repo's default branch") do |branch|
+        @options[:init] = branch
+      end
+
       opts.on("--commit-msg-hook", "Set commit-msg git hook mode") do
         @options[:commit_msg] = true
+      end
+
+      opts.on("-s", "--update-commit-sha SHA", "Update commit SHA") do |sha|
+        @options[:update_commit_sha] = sha
       end
     end
 
@@ -100,6 +197,10 @@ class JiraWorkflow
     end
   end
 
+  def set_init(branch)
+    @jw_config.set("default_branch", branch)
+  end
+
   def set_jira_workflow_configs(jira_str)
     unless m = jira_str.match(/\/?([A-Za-z]+-\d+)$/)
       puts "Invalid Jira key"
@@ -107,10 +208,16 @@ class JiraWorkflow
     end
     jira_key = m[1].upcase
 
-    jira_summary = JiraHelper.get_summary(jira_key)
+    jira_issue = JiraHelper.get_issue(jira_key)
+    jira_summary = JiraHelper.get_summary(jira_issue)
+    jira_status = JiraHelper.get_status(jira_issue)
+    if jira_status != "In Progress"
+      JiraHelper.set_status(jira_key, "In Progress")
+    end
     @jw_config.set("key", jira_key)
     @jw_config.set("summary", jira_summary)
     display_jira_workflow_configs
+    @git_helper.create_branch(jira_key.downcase)
   end
 
   def display_jira_workflow_configs
@@ -119,8 +226,9 @@ class JiraWorkflow
     if key.empty? || summary.empty?
       puts "No Jira Workflow configs found"
     else
-      puts "Jira key:     #{key}"
-      puts "Jira summary: #{summary}"
+      puts "Jira key:       #{key}"
+      puts "Jira summary:   #{summary}"
+      puts "Default branch: #{@rc.default_branch}"
     end
   end
 
@@ -142,18 +250,31 @@ class JiraWorkflow
       exit(1)
     end
 
-    if m = commit_msg.match(/\A\[[A-Za-z]+-\d+\]/)
-      puts "Jira key already exists: #{m[0]}"
-      exit(0)
-    end
-
-    File.write(commit_msg_file, "[#{@jw_config.get("key")}] #{commit_msg}")
+    File.write(commit_msg_file, update_commit_msg(commit_msg))
     puts "Commit message updated"
   end
 
+  def update_commit_msg(commit_msg)
+    commit_msg.gsub!(/\A\[[A-Za-z]+-\d+\]/, "") # remove the jira key from the commit message
+    "[#{@jw_config.get("key")}] #{commit_msg}" # add jw's jira key to the commit message
+  end
+
+  def update_commit_sha(sha)
+    puts "sha: #{sha}"
+    msg = `git log -1 --pretty=%B '#{sha}'`.strip
+    puts "msg: #{update_commit_msg(msg)}"
+    system("git commit --amend -m '#{update_commit_msg(msg)}' '#{sha}'")
+  end
+
   def run
-    if @options[:commit_msg]
+    if @options[:init]
+      set_init(@options[:init])
+    elsif @options[:commit_msg]
       set_commit_msg(ARGV)
+    elsif @options[:update_commit_sha]
+      puts "Not implemented"
+      exit(1)
+      update_commit_sha(@options[:update_commit_sha])
     elsif ARGV.empty?
       display_jira_workflow_configs
     else
