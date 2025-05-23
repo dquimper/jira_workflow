@@ -198,7 +198,7 @@ class JiraWorkflow
   end
 
   def set_init(branch)
-    @jw_config.set("default_branch", branch)
+    @jw_config.set("default-branch", branch)
   end
 
   def set_jira_workflow_configs(jira_str)
