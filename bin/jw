@@ -24,10 +24,6 @@ class JwRcConfig
     self[:git_branch_prefix] ||= "feature"
   end
 
-  def default_branch
-    self[:default_branch] ||= "main"
-  end
-
   def method_missing(key, *args)
     self[key]
   end
@@ -146,17 +142,19 @@ class JiraHelper
 end
 
 class GitHelper
-  def initialize(rc)
+  def initialize(rc, jw_config)
     @rc = rc
+    @jw_config = jw_config
   end
 
   def create_branch(jira_key)
     new_branch = "#{@rc.git_branch_prefix}/#{jira_key}"
+    default_branch = @jw_config.get("default-branch")
     # Check if the branch already exists
     if `git branch --list #{new_branch}`.strip.empty?
-      system("git stash && git checkout #{@rc.default_branch} && git pull && git checkout -b #{new_branch} && git stash pop")
+      system("git stash && git checkout #{default_branch} && git pull && git checkout -b #{new_branch} && git stash pop")
     else
-      system("git stash && git checkout #{@rc.default_branch} && git pull && git checkout #{new_branch} && git rebase #{@rc.default_branch} && git stash pop")
+      system("git stash && git checkout #{default_branch} && git pull && git checkout #{new_branch} && git rebase #{default_branch} && git stash pop")
     end
   end
 end
@@ -165,7 +163,7 @@ class JiraWorkflow
   def initialize(argv = [])
     @rc = JwRcConfig.load("~/.jwrc.yml")
     @jw_config = JwConfig.new(@rc)
-    @git_helper = GitHelper.new(@rc)
+    @git_helper = GitHelper.new(@rc, @jw_config)
 
     @options = {}
     opt_parser = OptionParser.new do |opts|
@@ -223,12 +221,13 @@ class JiraWorkflow
   def display_jira_workflow_configs
     key = @jw_config.get("key")
     summary = @jw_config.get("summary")
+    default_branch = @jw_config.get("default-branch")
     if key.empty? || summary.empty?
       puts "No Jira Workflow configs found"
     else
       puts "Jira key:       #{key}"
       puts "Jira summary:   #{summary}"
-      puts "Default branch: #{@rc.default_branch}"
+      puts "Default branch: #{default_branch}"
     end
   end
 
