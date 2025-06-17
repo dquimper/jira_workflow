@@ -7,6 +7,13 @@ require "json"
 require "yaml"
 require "base64"
 
+class JwError < StandardError
+  def initialize(message, status = 1)
+    super(message)
+    @status = status
+  end
+end
+
 class JwRcConfig
   def initialize(config)
     @config = config
@@ -42,10 +49,12 @@ class JwConfig
   end
 
   def get(key)
-    `git config --get --#{@rc.config_scope} jw.#{key}`.strip
+    value = `git config --get --#{@rc.config_scope} jw.#{key}`.strip
+    value.empty? ? nil : value
   end
 
   def set(key, value)
+    value.gsub!(/"/, '\\"')
     system("git config set --#{@rc.config_scope} jw.#{key} \"#{value}\"")
   end
 end
@@ -63,17 +72,14 @@ class JiraHelper
     end
 
     unless response.is_a?(Net::HTTPSuccess)
-      puts "Error fetching Jira issue: #{response.code} #{response.message}"
-      exit(1)
+      raise JwError.new("Error fetching Jira issue: #{response.code} #{response.message}")
     end
 
     JSON.parse(response.body)
   rescue JSON::ParserError => e
-    puts "Error parsing Jira response: #{e.message}"
-    exit(1)
+    raise JwError.new("Error parsing Jira response: #{e.message}")
   rescue StandardError => e
-    puts "Error accessing Jira: #{e.message}"
-    exit(1)
+    raise JwError.new("Error accessing Jira: #{e.message}")
   end
 
   def self.transition_map(jira_key)
@@ -88,18 +94,14 @@ class JiraHelper
     end
 
     unless response.is_a?(Net::HTTPSuccess)
-      puts "Error fetching Jira issue transitions: #{response.code} #{response.message}"
-      exit(1)
+      raise JwError.new("Error fetching Jira issue transitions: #{response.code} #{response.message}")
     end
 
     JSON.parse(response.body)["transitions"].to_h { |t| [t["name"], t["id"]] }
   rescue JSON::ParserError => e
-    puts "Error parsing Jira response: #{e.message}"
-    exit(1)
+    raise JwError.new("Error parsing Jira response: #{e.message}")
   rescue StandardError => e
-    puts "Error accessing Jira: #{e.message}"
-    puts e.backtrace_locations.first
-    exit(1)
+    raise JwError.new("Error accessing Jira: #{e.message}")
   end
 
   def self.set_status(jira_key, status)
@@ -120,16 +122,12 @@ class JiraHelper
     end
 
     unless response.is_a?(Net::HTTPSuccess)
-      puts "Error updating Jira issue status: #{response.code} #{response.message}"
-      exit(1)
+      raise JwError.new("Error updating Jira issue status: #{response.code} #{response.message}")
     end
   rescue JSON::ParserError => e
-    puts "Error parsing Jira response: #{e.message}"
-    exit(1)
+    raise JwError.new("Error parsing Jira response: #{e.message}")
   rescue StandardError => e
-    puts "Error accessing Jira: #{e.message}"
-    puts e.backtrace_locations.first
-    exit(1)
+    raise JwError.new("Error accessing Jira: #{e.message}")
   end
 
   def self.get_summary(issue)
@@ -149,13 +147,16 @@ class GitHelper
 
   def create_branch(jira_key)
     new_branch = "#{@rc.git_branch_prefix}/#{jira_key}"
-    default_branch = @jw_config.get("default-branch")
     # Check if the branch already exists
     if `git branch --list #{new_branch}`.strip.empty?
       system("git stash && git checkout #{default_branch} && git pull && git checkout -b #{new_branch} && git stash pop")
     else
       system("git stash && git checkout #{default_branch} && git pull && git checkout #{new_branch} && git rebase #{default_branch} && git stash pop")
     end
+  end
+
+  def default_branch
+    @jw_config.get("default-branch") || "main"
   end
 end
 
@@ -170,7 +171,7 @@ class JiraWorkflow
       opts.banner = "Usage: jw [options]"
       opts.on("-h", "--help", "Show this help message") do
         puts opts
-        exit
+        exit(0)
       end
 
       opts.on("-i", "--init BRANCH", "Initialize jw with repo's default branch") do |branch|
@@ -201,8 +202,7 @@ class JiraWorkflow
 
   def set_jira_workflow_configs(jira_str)
     unless m = jira_str.match(/\/?([A-Za-z]+-\d+)$/)
-      puts "Invalid Jira key"
-      exit(1)
+      raise JwError.new("Invalid Jira key")
     end
     jira_key = m[1].upcase
 
@@ -221,32 +221,28 @@ class JiraWorkflow
   def display_jira_workflow_configs
     key = @jw_config.get("key")
     summary = @jw_config.get("summary")
-    default_branch = @jw_config.get("default-branch")
     if key.empty? || summary.empty?
       puts "No Jira Workflow configs found"
     else
       puts "Jira key:       #{key}"
       puts "Jira summary:   #{summary}"
-      puts "Default branch: #{default_branch}"
+      puts "Default branch: #{@git_helper.default_branch}"
     end
   end
 
   def set_commit_msg(argv)
     commit_msg_file = argv.first
     if commit_msg_file.nil?
-      puts "No commit message file provided"
-      exit(1)
+      raise JwError.new("No commit message file provided")
     end
 
     if !File.exist?(commit_msg_file)
-      puts "Commit message file does not exist"
-      exit(1)
+      raise JwError.new("Commit message file does not exist")
     end
 
     commit_msg = File.read(commit_msg_file)
     if commit_msg.empty?
-      puts "Commit message file is empty"
-      exit(1)
+      raise JwError.new("Commit message file is empty")
     end
 
     File.write(commit_msg_file, update_commit_msg(commit_msg))
@@ -271,8 +267,7 @@ class JiraWorkflow
     elsif @options[:commit_msg]
       set_commit_msg(ARGV)
     elsif @options[:update_commit_sha]
-      puts "Not implemented"
-      exit(1)
+      raise JwError.new("Not implemented")
       update_commit_sha(@options[:update_commit_sha])
     elsif ARGV.empty?
       display_jira_workflow_configs
@@ -284,6 +279,11 @@ class JiraWorkflow
 end
 
 if __FILE__ == $0
-  jw = JiraWorkflow.new(ARGV)
-  exit(jw.run)
+  begin
+    jw = JiraWorkflow.new(ARGV)
+    exit(0)
+  rescue JwError => e
+    puts e.message
+    exit(e.status)
+  end
 end
