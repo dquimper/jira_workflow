@@ -156,7 +156,12 @@ class GitHelper
   end
 
   def default_branch
-    @jw_config.get("default-branch") || "main"
+    branch = @jw_config.get("default-branch")
+    if branch.nil? || branch.empty?
+      "main"
+    else
+      branch
+    end
   end
 end
 
@@ -184,6 +189,10 @@ class JiraWorkflow
 
       opts.on("-s", "--update-commit-sha SHA", "Update commit SHA") do |sha|
         @options[:update_commit_sha] = sha
+      end
+
+      opts.on("-r", "--reset", "Reset jw config") do
+        @options[:reset] = true
       end
     end
 
@@ -221,7 +230,7 @@ class JiraWorkflow
   def display_jira_workflow_configs
     key = @jw_config.get("key")
     summary = @jw_config.get("summary")
-    if key.empty? || summary.empty?
+    if !key || !summary
       puts "No Jira Workflow configs found"
     else
       puts "Jira key:       #{key}"
@@ -250,8 +259,11 @@ class JiraWorkflow
   end
 
   def update_commit_msg(commit_msg)
+    key = @jw_config.get("key")
+    return commit_msg if !key
+
     commit_msg.gsub!(/\A\[[A-Za-z]+-\d+\]/, "") # remove the jira key from the commit message
-    "[#{@jw_config.get("key")}] #{commit_msg}" # add jw's jira key to the commit message
+    "[#{key}] #{commit_msg}" # add jw's jira key to the commit message
   end
 
   def update_commit_sha(sha)
@@ -261,9 +273,18 @@ class JiraWorkflow
     system("git commit --amend -m '#{update_commit_msg(msg)}' '#{sha}'")
   end
 
+  def reset_config
+    @jw_config.set("key", "")
+    @jw_config.set("summary", "")
+    @jw_config.set("default-branch", "")
+    puts "Jira Workflow configs reset"
+  end
+
   def run
     if @options[:init]
       set_init(@options[:init])
+    elsif @options[:reset]
+      reset_config
     elsif @options[:commit_msg]
       set_commit_msg(ARGV)
     elsif @options[:update_commit_sha]
@@ -281,7 +302,7 @@ end
 if __FILE__ == $0
   begin
     jw = JiraWorkflow.new(ARGV)
-    exit(0)
+    exit(jw.run)
   rescue JwError => e
     puts e.message
     exit(e.status)
