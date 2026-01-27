@@ -55,4 +55,14 @@ class JwRcConfigTest < Test::Unit::TestCase
     config = JwRcConfig.load('/nonexistent/path/to/config.yml')
     assert_equal({}, config.instance_variable_get(:@config))
   end
+
+  def test_git_branch_prefix_default
+    config = JwRcConfig.new({})
+    assert_equal 'feature', config.git_branch_prefix
+  end
+
+  def test_git_branch_prefix_custom
+    config = JwRcConfig.new({ 'git_branch_prefix' => 'bugfix' })
+    assert_equal 'bugfix', config.git_branch_prefix
+  end
 end

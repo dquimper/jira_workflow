@@ -12,6 +12,10 @@ class JwError < StandardError
     super(message)
     @status = status
   end
+
+  def status
+    @status
+  end
 end
 
 class JwRcConfig
@@ -267,10 +271,137 @@ class JiraWorkflow
   end
 
   def update_commit_sha(sha)
-    puts "sha: #{sha}"
+    # Verify the commit exists
+    unless system("git rev-parse --verify '#{sha}' > /dev/null 2>&1")
+      raise JwError.new("Commit SHA '#{sha}' not found")
+    end
+
+    # Get the current commit message
     msg = `git log -1 --pretty=%B '#{sha}'`.strip
-    puts "msg: #{update_commit_msg(msg)}"
-    system("git commit --amend -m '#{update_commit_msg(msg)}' '#{sha}'")
+    if msg.empty?
+      raise JwError.new("Could not retrieve commit message for SHA '#{sha}'")
+    end
+
+    # Update the commit message with JIRA key tag
+    updated_msg = update_commit_msg(msg)
+    
+    # Check if this is the current HEAD
+    current_head = `git rev-parse HEAD`.strip
+    if sha == current_head || sha.start_with?(current_head)
+      # If it's HEAD, we can use amend
+      escaped_msg = updated_msg.gsub(/'/, "'\\''")
+      unless system("git commit --amend -m '#{escaped_msg}'")
+        raise JwError.new("Failed to update commit message")
+      end
+      puts "Commit message updated for HEAD"
+    else
+      # For commits that are not HEAD, use interactive rebase
+      # Find the parent commit to start rebase from
+      parent = `git rev-parse '#{sha}^' 2>/dev/null`.strip
+      if parent.empty?
+        raise JwError.new("Cannot update commit: SHA '#{sha}' has no parent (root commit)")
+      end
+      
+      # Create temporary scripts for rebase
+      temp_seq_editor = "/tmp/jw_seq_editor_#{$$}.sh"
+      temp_editor = "/tmp/jw_editor_#{$$}.sh"
+      
+      # Script to mark the target commit as "edit" in rebase todo
+      File.write(temp_seq_editor, <<~SCRIPT)
+        #!/bin/sh
+        sed -i.bak "s/^pick #{sha[0..7]}/edit #{sha[0..7]}/" "$1"
+      SCRIPT
+      File.chmod(0o755, temp_seq_editor)
+      
+      # Script to update the commit message
+      # Write the message to the file using a heredoc to preserve newlines
+      # Escape the message properly for the shell script
+      escaped_msg = updated_msg.gsub(/'/, "'\\''").gsub(/\$/, "\\$").gsub(/`/, "\\`")
+      File.write(temp_editor, <<~SCRIPT)
+        #!/bin/sh
+        cat > "$1" << 'MESSAGE_EOF'
+      #{updated_msg}
+      MESSAGE_EOF
+      SCRIPT
+      File.chmod(0o755, temp_editor)
+      
+      # Use both GIT_SEQUENCE_EDITOR and GIT_EDITOR for the rebase
+      env = {
+        "GIT_SEQUENCE_EDITOR" => temp_seq_editor,
+        "GIT_EDITOR" => temp_editor
+      }
+      
+      # Check if we're already in a rebase (shouldn't be, but be safe)
+      in_rebase_before = File.directory?(".git/rebase-merge") || File.directory?(".git/rebase-apply")
+      
+      # Run the rebase - it should stop when it reaches the commit marked as "edit"
+      # Note: git rebase -i returns non-zero when it stops for editing, which is expected
+      system(env, "git rebase -i '#{parent}' > /dev/null 2>&1")
+      
+      # Check if we're now in a rebase state (git stopped for editing)
+      in_rebase_after = File.directory?(".git/rebase-merge") || File.directory?(".git/rebase-apply")
+      
+      # If rebase stopped for editing, we need to amend the commit with the updated message
+      # Note: GIT_EDITOR is not automatically called when rebase stops for editing
+      # We need to manually amend the commit
+      if in_rebase_after && !in_rebase_before
+        # The rebase stopped for editing, which is what we want
+        # Amend the commit with the updated message
+        escaped_msg = updated_msg.gsub(/'/, "'\\''")
+        amend_result = system("git commit --amend -m '#{escaped_msg}' > /dev/null 2>&1")
+        unless amend_result
+          # Clean up
+          File.delete(temp_seq_editor) if File.exist?(temp_seq_editor)
+          File.delete(temp_editor) if File.exist?(temp_editor)
+          raise JwError.new("Failed to amend commit message during rebase. You may need to resolve conflicts manually.")
+        end
+        
+        # Continue the rebase
+        continue_result = system("git rebase --continue > /dev/null 2>&1")
+        unless continue_result
+          # Clean up
+          File.delete(temp_seq_editor) if File.exist?(temp_seq_editor)
+          File.delete(temp_editor) if File.exist?(temp_editor)
+          raise JwError.new("Failed to continue rebase after updating commit message. You may need to resolve conflicts manually.")
+        end
+      elsif !in_rebase_after
+        # Rebase completed immediately (didn't stop for editing)
+        # This might mean the commit wasn't in the rebase range or the sed didn't match
+        # Verify the commit was actually updated
+        current_branch = `git rev-parse --abbrev-ref HEAD`.strip
+        found_updated = false
+        
+        # Check if the original commit still exists with updated message
+        if system("git rev-parse --verify '#{sha}' > /dev/null 2>&1")
+          current_msg = `git log -1 --pretty=%B '#{sha}' 2>/dev/null`.strip
+          if current_msg.strip == updated_msg.strip
+            found_updated = true
+          end
+        else
+          # Commit was rewritten, search for it in the recent history
+          `git log --format="%H|%B" #{parent}..#{current_branch}`.each_line do |line|
+            commit_sha, commit_msg = line.split("|", 2)
+            if commit_msg && commit_msg.strip == updated_msg.strip
+              found_updated = true
+              break
+            end
+          end
+        end
+        
+        unless found_updated
+          # Clean up
+          File.delete(temp_seq_editor) if File.exist?(temp_seq_editor)
+          File.delete(temp_editor) if File.exist?(temp_editor)
+          raise JwError.new("Rebase completed but commit message was not updated. The rebase may have completed without stopping for editing.")
+        end
+      end
+      
+      # Clean up
+      File.delete(temp_seq_editor) if File.exist?(temp_seq_editor)
+      File.delete(temp_editor) if File.exist?(temp_editor)
+      
+      puts "Commit message updated for SHA #{sha[0..7]}"
+    end
   end
 
   def reset_config
@@ -288,7 +419,6 @@ class JiraWorkflow
     elsif @options[:commit_msg]
       set_commit_msg(ARGV)
     elsif @options[:update_commit_sha]
-      raise JwError.new("Not implemented")
       update_commit_sha(@options[:update_commit_sha])
     elsif ARGV.empty?
       display_jira_workflow_configs
