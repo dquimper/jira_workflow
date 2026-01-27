@@ -427,8 +427,8 @@ class JiraWorkflowTest < Test::Unit::TestCase
     jw.instance_variable_get(:@jw_config).expects(:get).with('key').returns(@jira_key)
     
     original_msg = "[OLD-456] Original commit message"
-    # The regex removes "[OLD-456]" but leaves the space
-    expected_msg = "[#{@jira_key}]  Original commit message"
+    # The regex removes "[OLD-456]" and any trailing whitespace
+    expected_msg = "[#{@jira_key}] Original commit message"
     
     result = jw.update_commit_msg(original_msg)
     assert_equal expected_msg, result

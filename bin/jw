@@ -266,7 +266,7 @@ class JiraWorkflow
     key = @jw_config.get("key")
     return commit_msg if !key
 
-    commit_msg.gsub!(/\A\[[A-Za-z]+-\d+\]/, "") # remove the jira key from the commit message
+    commit_msg.gsub!(/\A\[[A-Za-z]+-\d+\]\s*/, "") # remove the jira key and any trailing whitespace from the commit message
     "[#{key}] #{commit_msg}" # add jw's jira key to the commit message
   end
 
