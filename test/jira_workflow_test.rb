@@ -84,32 +84,30 @@ class JiraWorkflowTest < Test::Unit::TestCase
   end
 
   def test_update_commit_sha_for_head_commit_with_existing_jira_key
-    # Test updating commit message for HEAD when commit already has JIRA key
+    # Test updating commit message for HEAD when commit already has JIRA key — message left unchanged
     jw = JiraWorkflow.new(['-s', @commit_sha])
-    
+
     # Set up JIRA key in config
     jw.instance_variable_get(:@jw_config).set('key', @jira_key)
-    
+
     original_msg = "[OLD-456] Original commit message"
-    # The regex removes "[OLD-456]" but leaves the space, so result has two spaces
-    expected_msg = "[#{@jira_key}]  Original commit message"
-    escaped_msg = expected_msg.gsub(/'/, "'\\''")
-    
+    escaped_msg = original_msg.gsub(/'/, "'\\''")
+
     # Mock git rev-parse to verify commit exists
     JiraWorkflow.any_instance.expects(:system).with("git rev-parse --verify '#{@commit_sha}' > /dev/null 2>&1").returns(true)
-    
+
     # Mock git log to get commit message
     JiraWorkflow.any_instance.expects(:`).with("git log -1 --pretty=%B '#{@commit_sha}'").returns(original_msg)
-    
+
     # Mock git rev-parse HEAD to return the same SHA
     JiraWorkflow.any_instance.expects(:`).with("git rev-parse HEAD").returns(@commit_sha)
-    
-    # Mock git commit --amend
+
+    # Mock git commit --amend with the original (unchanged) message
     JiraWorkflow.any_instance.expects(:system).with("git commit --amend -m '#{escaped_msg}'").returns(true)
-    
+
     # Mock puts
     JiraWorkflow.any_instance.expects(:puts).with("Commit message updated for HEAD")
-    
+
     jw.update_commit_sha(@commit_sha)
   end
 
@@ -418,20 +416,18 @@ class JiraWorkflowTest < Test::Unit::TestCase
     assert_equal original_msg, result
   end
 
-  def test_update_commit_msg_replaces_existing_jira_key
-    # Test update_commit_msg replaces existing JIRA key
+  def test_update_commit_msg_preserves_existing_jira_key
+    # Test update_commit_msg leaves message unchanged when it already has a JIRA key
     jw = JiraWorkflow.new([])
-    
+
     # Set up JIRA key
     jw.instance_variable_get(:@jw_config).set('key', @jira_key)
     jw.instance_variable_get(:@jw_config).expects(:get).with('key').returns(@jira_key)
-    
+
     original_msg = "[OLD-456] Original commit message"
-    # The regex removes "[OLD-456]" and any trailing whitespace
-    expected_msg = "[#{@jira_key}] Original commit message"
-    
+
     result = jw.update_commit_msg(original_msg)
-    assert_equal expected_msg, result
+    assert_equal original_msg, result
   end
 
   def test_set_commit_msg_success

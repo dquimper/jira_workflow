@@ -265,9 +265,9 @@ class JiraWorkflow
   def update_commit_msg(commit_msg)
     key = @jw_config.get("key")
     return commit_msg if !key
+    return commit_msg if commit_msg.match?(/\A\[[A-Za-z]+-\d+\]/)
 
-    commit_msg.gsub!(/\A\[[A-Za-z]+-\d+\]\s*/, "") # remove the jira key and any trailing whitespace from the commit message
-    "[#{key}] #{commit_msg}" # add jw's jira key to the commit message
+    "[#{key}] #{commit_msg}"
   end
 
   def update_commit_sha(sha)
