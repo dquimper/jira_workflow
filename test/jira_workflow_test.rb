@@ -444,14 +444,35 @@ class JiraWorkflowTest < Test::Unit::TestCase
       jw.instance_variable_get(:@jw_config).set('key', @jira_key)
       jw.instance_variable_get(:@jw_config).expects(:get).with('key').returns(@jira_key)
       
-      # Mock puts
-      JiraWorkflow.any_instance.expects(:puts).with('Commit message updated')
-      
+      # Mock puts — should output the key that ends up in the commit
+      JiraWorkflow.any_instance.expects(:puts).with(@jira_key)
+
       jw.set_commit_msg([temp_file.path])
       
       # Verify file was updated
       updated_content = File.read(temp_file.path)
       assert_equal "[#{@jira_key}] Original commit message", updated_content
+    ensure
+      temp_file.unlink
+    end
+  end
+
+  def test_set_commit_msg_outputs_existing_key_when_already_present
+    jw = JiraWorkflow.new(['--commit-msg-hook'])
+
+    temp_file = Tempfile.new('commit_msg')
+    temp_file.write('[OLD-456] Already keyed message')
+    temp_file.close
+
+    begin
+      jw.instance_variable_get(:@jw_config).set('key', @jira_key)
+      jw.instance_variable_get(:@jw_config).expects(:get).with('key').returns(@jira_key)
+
+      JiraWorkflow.any_instance.expects(:puts).with('OLD-456')
+
+      jw.set_commit_msg([temp_file.path])
+
+      assert_equal '[OLD-456] Already keyed message', File.read(temp_file.path)
     ensure
       temp_file.unlink
     end

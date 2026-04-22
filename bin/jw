@@ -258,8 +258,11 @@ class JiraWorkflow
       raise JwError.new("Commit message file is empty")
     end
 
-    File.write(commit_msg_file, update_commit_msg(commit_msg))
-    puts "Commit message updated"
+    updated_msg = update_commit_msg(commit_msg)
+    File.write(commit_msg_file, updated_msg)
+    if m = updated_msg.match(/\A\[([A-Za-z]+-\d+)\]/)
+      puts m[1]
+    end
   end
 
   def update_commit_msg(commit_msg)
