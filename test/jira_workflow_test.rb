@@ -442,10 +442,9 @@ class JiraWorkflowTest < Test::Unit::TestCase
     begin
       # Set up JIRA key
       jw.instance_variable_get(:@jw_config).set('key', @jira_key)
-      jw.instance_variable_get(:@jw_config).expects(:get).with('key').returns(@jira_key)
-      
-      # Mock puts — should output the key that ends up in the commit
-      JiraWorkflow.any_instance.expects(:puts).with(@jira_key)
+      jw.instance_variable_get(:@jw_config).expects(:get).with('key').returns(@jira_key).twice
+
+      JiraWorkflow.any_instance.expects(:puts).with("Jira key added to commit message: #{@jira_key}")
 
       jw.set_commit_msg([temp_file.path])
       
@@ -466,13 +465,30 @@ class JiraWorkflowTest < Test::Unit::TestCase
 
     begin
       jw.instance_variable_get(:@jw_config).set('key', @jira_key)
-      jw.instance_variable_get(:@jw_config).expects(:get).with('key').returns(@jira_key)
 
-      JiraWorkflow.any_instance.expects(:puts).with('OLD-456')
+      JiraWorkflow.any_instance.expects(:puts).with('Jira key already in commit message: OLD-456')
 
       jw.set_commit_msg([temp_file.path])
 
       assert_equal '[OLD-456] Already keyed message', File.read(temp_file.path)
+    ensure
+      temp_file.unlink
+    end
+  end
+
+  def test_set_commit_msg_fails_when_no_key_anywhere
+    jw = JiraWorkflow.new(['--commit-msg-hook'])
+
+    temp_file = Tempfile.new('commit_msg')
+    temp_file.write('No key in this message')
+    temp_file.close
+
+    begin
+      jw.instance_variable_get(:@jw_config).expects(:get).with('key').returns(nil)
+
+      assert_raises(JwError) do
+        jw.set_commit_msg([temp_file.path])
+      end
     ensure
       temp_file.unlink
     end

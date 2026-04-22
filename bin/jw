@@ -258,10 +258,16 @@ class JiraWorkflow
       raise JwError.new("Commit message file is empty")
     end
 
-    updated_msg = update_commit_msg(commit_msg)
-    File.write(commit_msg_file, updated_msg)
-    if m = updated_msg.match(/\A\[([A-Za-z]+-\d+)\]/)
-      puts m[1]
+    existing_key = commit_msg.match(/\A\[([A-Za-z]+-\d+)\]/)&.[](1)
+    jw_key = @jw_config.get("key")
+
+    if existing_key
+      puts "Jira key already in commit message: #{existing_key}"
+    elsif jw_key
+      File.write(commit_msg_file, update_commit_msg(commit_msg))
+      puts "Jira key added to commit message: #{jw_key}"
+    else
+      raise JwError.new("Commit aborted: no Jira key in commit message and no JW key configured")
     end
   end
 
